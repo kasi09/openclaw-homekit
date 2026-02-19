@@ -23,6 +23,12 @@ class HomeKitSkill(Skill):
     - get_characteristic: Read a characteristic value
     - set_characteristic: Write a characteristic value
     - list_pairings: List all stored pairings
+    - identify: Trigger device identification (blink/beep)
+    - get_all_characteristics: Read all characteristics for a device at once
+    - set_multiple: Set multiple characteristics in one call
+    - get_device_info: Get device manufacturer, model, serial, firmware info
+    - device_summary: Human-readable summary of all paired devices
+    - health_check: Check reachability of all paired devices
     """
 
     def __init__(self, pairing_file: str = "homekit_pairings.json") -> None:
@@ -78,6 +84,18 @@ class HomeKitSkill(Skill):
             return self._set_characteristic(parameters)
         elif action == "list_pairings":
             return self._list_pairings()
+        elif action == "identify":
+            return self._identify(parameters)
+        elif action == "get_all_characteristics":
+            return self._get_all_characteristics(parameters)
+        elif action == "set_multiple":
+            return self._set_multiple(parameters)
+        elif action == "get_device_info":
+            return self._get_device_info(parameters)
+        elif action == "device_summary":
+            return self._device_summary()
+        elif action == "health_check":
+            return self._health_check()
         else:
             raise ValueError(f"Unknown action: {action}")
 
@@ -231,6 +249,200 @@ class HomeKitSkill(Skill):
         controller = self._get_controller()
         pairings = [{"device_id": alias} for alias in controller.aliases]
         return {"pairings": pairings, "count": len(pairings)}
+
+    def _identify(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        """Trigger device identification (blink/beep)."""
+        device_id = parameters.get("device_id")
+        if not device_id:
+            raise ValueError("Missing required parameter: device_id")
+
+        async def _do_identify() -> None:
+            controller = self._get_controller()
+            if device_id not in controller.pairings:
+                raise ValueError(f"No pairing found for device: {device_id}")
+            pairing = controller.pairings[device_id]
+            await pairing.identify()
+
+        self._run_async(_do_identify())
+        return {"device_id": device_id, "identified": True}
+
+    def _get_all_characteristics(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        """Read all characteristics for a device at once."""
+        device_id = parameters.get("device_id")
+        if not device_id:
+            raise ValueError("Missing required parameter: device_id")
+
+        async def _do_get_all() -> dict[str, Any]:
+            controller = self._get_controller()
+            if device_id not in controller.pairings:
+                raise ValueError(f"No pairing found for device: {device_id}")
+            pairing = controller.pairings[device_id]
+            accessories = await pairing.list_accessories_and_characteristics()
+
+            targets: list[tuple[int, int]] = []
+            if isinstance(accessories, Accessories):
+                for acc in accessories:
+                    for svc in acc.services:
+                        for char in svc.characteristics:
+                            targets.append((acc.aid, char.iid))
+            elif isinstance(accessories, list):
+                for acc in accessories:
+                    for svc in acc.get("services", []):
+                        for char in svc.get("characteristics", []):
+                            aid = acc.get("aid")
+                            iid = char.get("iid")
+                            if aid is not None and iid is not None:
+                                targets.append((int(aid), int(iid)))
+
+            if not targets:
+                return {"characteristics": [], "count": 0}
+
+            chars = await pairing.get_characteristics(targets)
+            result_list = [
+                {"aid": aid, "iid": iid, "value": data.get("value")}
+                for (aid, iid), data in chars.items()
+            ]
+            return {"characteristics": result_list, "count": len(result_list)}
+
+        result = self._run_async(_do_get_all())
+        return {"device_id": device_id, **result}
+
+    def _set_multiple(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        """Set multiple characteristics in one call."""
+        device_id = parameters.get("device_id")
+        if not device_id:
+            raise ValueError("Missing required parameter: device_id")
+        characteristics = parameters.get("characteristics")
+        if not characteristics or not isinstance(characteristics, list):
+            raise ValueError("Missing required parameter: characteristics")
+
+        targets: list[tuple[int, int, Any]] = []
+        for char in characteristics:
+            if not isinstance(char, dict):
+                raise ValueError("Each characteristic must be a dict with aid, iid, value")
+            aid = char.get("aid")
+            iid = char.get("iid")
+            if aid is None or iid is None or "value" not in char:
+                raise ValueError("Each characteristic must have aid, iid, and value")
+            targets.append((int(aid), int(iid), char["value"]))
+
+        async def _do_set_multiple() -> None:
+            controller = self._get_controller()
+            if device_id not in controller.pairings:
+                raise ValueError(f"No pairing found for device: {device_id}")
+            pairing = controller.pairings[device_id]
+            await pairing.put_characteristics(targets)
+
+        self._run_async(_do_set_multiple())
+        return {"device_id": device_id, "count": len(targets), "success": True}
+
+    def _get_device_info(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        """Get device information from the AccessoryInformation service."""
+        device_id = parameters.get("device_id")
+        if not device_id:
+            raise ValueError("Missing required parameter: device_id")
+
+        # HAP characteristic type short codes for AccessoryInformation
+        char_map = {
+            "20": "manufacturer",
+            "21": "model",
+            "23": "name",
+            "30": "serial_number",
+            "52": "firmware_revision",
+            "53": "hardware_revision",
+        }
+
+        async def _do_get_info() -> dict[str, str]:
+            controller = self._get_controller()
+            if device_id not in controller.pairings:
+                raise ValueError(f"No pairing found for device: {device_id}")
+            pairing = controller.pairings[device_id]
+            accessories = await pairing.list_accessories_and_characteristics()
+            info: dict[str, str] = {}
+
+            if isinstance(accessories, Accessories):
+                for acc in accessories:
+                    for svc in acc.services:
+                        if "3E" in str(svc.type).upper():
+                            for char in svc.characteristics:
+                                char_type = str(char.type).upper()
+                                for key, field in char_map.items():
+                                    if key.upper() in char_type:
+                                        info[field] = str(char.value or "")
+            elif isinstance(accessories, list):
+                for acc in accessories:
+                    for svc in acc.get("services", []):
+                        if "3E" in str(svc.get("type", "")).upper():
+                            for char in svc.get("characteristics", []):
+                                char_type = str(char.get("type", "")).upper()
+                                for key, field in char_map.items():
+                                    if key.upper() in char_type:
+                                        info[field] = str(char.get("value", ""))
+
+            return info
+
+        info = self._run_async(_do_get_info())
+        return {
+            "device_id": device_id,
+            "manufacturer": info.get("manufacturer", ""),
+            "model": info.get("model", ""),
+            "name": info.get("name", ""),
+            "serial_number": info.get("serial_number", ""),
+            "firmware_revision": info.get("firmware_revision", ""),
+            "hardware_revision": info.get("hardware_revision", ""),
+        }
+
+    def _device_summary(self) -> dict[str, Any]:
+        """Human-readable summary of all paired devices."""
+        controller = self._get_controller()
+        devices: list[dict[str, Any]] = []
+
+        for alias in controller.aliases:
+            device_info: dict[str, Any] = {
+                "device_id": alias,
+                "services": [],
+                "reachable": True,
+            }
+            try:
+                if alias in controller.pairings:
+                    pairing = controller.pairings[alias]
+                    accessories = self._run_async(pairing.list_accessories_and_characteristics())
+                    acc_list = self._format_accessories(accessories)
+                    service_types = []
+                    for acc in acc_list:
+                        for svc in acc.get("services", []):
+                            service_types.append(svc.get("type", "unknown"))
+                    device_info["services"] = service_types
+                    device_info["accessory_count"] = len(acc_list)
+            except Exception:
+                device_info["reachable"] = False
+            devices.append(device_info)
+
+        return {"devices": devices, "count": len(devices)}
+
+    def _health_check(self) -> dict[str, Any]:
+        """Check reachability of all paired HomeKit devices."""
+        controller = self._get_controller()
+        results: list[dict[str, Any]] = []
+
+        for alias in controller.aliases:
+            status: dict[str, Any] = {"device_id": alias, "reachable": False}
+            try:
+                if alias in controller.pairings:
+                    pairing = controller.pairings[alias]
+                    self._run_async(pairing.list_accessories_and_characteristics())
+                    status["reachable"] = True
+            except Exception as e:
+                status["error"] = str(e)
+            results.append(status)
+
+        reachable_count = sum(1 for r in results if r["reachable"])
+        return {
+            "devices": results,
+            "total": len(results),
+            "reachable": reachable_count,
+            "unreachable": len(results) - reachable_count,
+        }
 
     @staticmethod
     def _format_accessories(accessories: Any) -> list[dict[str, Any]]:

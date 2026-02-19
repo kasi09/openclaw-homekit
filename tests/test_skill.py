@@ -388,3 +388,419 @@ def test_run_async_executes_coroutine(skill):
     # Cleanup
     if skill._loop:
         skill._loop.call_soon_threadsafe(skill._loop.stop)
+
+
+# --- identify ---
+
+
+def test_identify_success(skill, mock_controller):
+    """Test triggering device identification."""
+    pairing = _make_pairing()
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("identify", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+    assert result["identified"] is True
+    assert result["device_id"] == "AA:BB:CC:DD:EE:FF"
+    pairing.identify.assert_called_once()
+
+
+def test_identify_missing_device_id(skill):
+    """Test identify without device_id raises error."""
+    with pytest.raises(ValueError, match="Missing required parameter: device_id"):
+        skill.process("identify", {})
+
+
+def test_identify_unknown_device(skill, mock_controller):
+    """Test identify for an unpaired device."""
+    mock_controller.pairings = {}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        with pytest.raises(ValueError, match="No pairing found for device"):
+            skill.process("identify", {"device_id": "unknown"})
+
+
+# --- get_all_characteristics ---
+
+
+def test_get_all_characteristics(skill, mock_controller):
+    """Test reading all characteristics for a device."""
+    accessories = [
+        {
+            "aid": 1,
+            "services": [
+                {
+                    "type": "light",
+                    "characteristics": [
+                        {"iid": 10, "type": "on", "value": True},
+                        {"iid": 11, "type": "brightness", "value": 75},
+                    ],
+                }
+            ],
+        }
+    ]
+    pairing = _make_pairing(accessories)
+    pairing.get_characteristics.return_value = {
+        (1, 10): {"value": True},
+        (1, 11): {"value": 75},
+    }
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("get_all_characteristics", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+    assert result["device_id"] == "AA:BB:CC:DD:EE:FF"
+    assert result["count"] == 2
+
+
+def test_get_all_characteristics_empty_device(skill, mock_controller):
+    """Test reading characteristics for a device with no services."""
+    pairing = _make_pairing([{"aid": 1, "services": []}])
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("get_all_characteristics", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+    assert result["count"] == 0
+    assert result["characteristics"] == []
+
+
+def test_get_all_characteristics_missing_device_id(skill):
+    """Test get_all_characteristics without device_id."""
+    with pytest.raises(ValueError, match="Missing required parameter: device_id"):
+        skill.process("get_all_characteristics", {})
+
+
+def test_get_all_characteristics_unknown_device(skill, mock_controller):
+    """Test get_all_characteristics for unpaired device."""
+    mock_controller.pairings = {}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        with pytest.raises(ValueError, match="No pairing found for device"):
+            skill.process("get_all_characteristics", {"device_id": "unknown"})
+
+
+def test_get_all_characteristics_multiple_accessories(skill, mock_controller):
+    """Test reading characteristics from multiple accessories."""
+    accessories = [
+        {
+            "aid": 1,
+            "services": [
+                {"type": "light", "characteristics": [{"iid": 10, "type": "on", "value": True}]}
+            ],
+        },
+        {
+            "aid": 2,
+            "services": [
+                {"type": "sensor", "characteristics": [{"iid": 20, "type": "temp", "value": 22}]}
+            ],
+        },
+    ]
+    pairing = _make_pairing(accessories)
+    pairing.get_characteristics.return_value = {
+        (1, 10): {"value": True},
+        (2, 20): {"value": 22},
+    }
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("get_all_characteristics", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+    assert result["count"] == 2
+
+
+# --- set_multiple ---
+
+
+def test_set_multiple(skill, mock_controller):
+    """Test setting multiple characteristics at once."""
+    pairing = _make_pairing()
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process(
+            "set_multiple",
+            {
+                "device_id": "AA:BB:CC:DD:EE:FF",
+                "characteristics": [
+                    {"aid": 1, "iid": 10, "value": True},
+                    {"aid": 1, "iid": 11, "value": 75},
+                ],
+            },
+        )
+
+    assert result["success"] is True
+    assert result["count"] == 2
+    pairing.put_characteristics.assert_called_once_with([(1, 10, True), (1, 11, 75)])
+
+
+def test_set_multiple_single(skill, mock_controller):
+    """Test setting a single characteristic via set_multiple."""
+    pairing = _make_pairing()
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process(
+            "set_multiple",
+            {
+                "device_id": "AA:BB:CC:DD:EE:FF",
+                "characteristics": [{"aid": 1, "iid": 10, "value": False}],
+            },
+        )
+
+    assert result["success"] is True
+    assert result["count"] == 1
+
+
+def test_set_multiple_missing_device_id(skill):
+    """Test set_multiple without device_id."""
+    with pytest.raises(ValueError, match="Missing required parameter: device_id"):
+        skill.process("set_multiple", {"characteristics": [{"aid": 1, "iid": 1, "value": 1}]})
+
+
+def test_set_multiple_missing_characteristics(skill):
+    """Test set_multiple without characteristics."""
+    with pytest.raises(ValueError, match="Missing required parameter: characteristics"):
+        skill.process("set_multiple", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+
+def test_set_multiple_invalid_format(skill):
+    """Test set_multiple with invalid characteristic format."""
+    with pytest.raises(ValueError, match="Each characteristic must have aid, iid, and value"):
+        skill.process(
+            "set_multiple",
+            {
+                "device_id": "AA:BB:CC:DD:EE:FF",
+                "characteristics": [{"aid": 1, "iid": 10}],  # missing value
+            },
+        )
+
+
+def test_set_multiple_unknown_device(skill, mock_controller):
+    """Test set_multiple for unpaired device."""
+    mock_controller.pairings = {}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        with pytest.raises(ValueError, match="No pairing found for device"):
+            skill.process(
+                "set_multiple",
+                {
+                    "device_id": "unknown",
+                    "characteristics": [{"aid": 1, "iid": 10, "value": True}],
+                },
+            )
+
+
+# --- get_device_info ---
+
+
+def test_get_device_info(skill, mock_controller):
+    """Test reading device information."""
+    accessories = [
+        {
+            "aid": 1,
+            "services": [
+                {
+                    "type": "0000003E-0000-1000-8000-0026BB765291",
+                    "characteristics": [
+                        {"type": "00000020", "value": "TestCorp"},
+                        {"type": "00000021", "value": "LightBulb"},
+                        {"type": "00000023", "value": "My Light"},
+                        {"type": "00000030", "value": "SN12345"},
+                        {"type": "00000052", "value": "1.2.3"},
+                        {"type": "00000053", "value": "1.0.0"},
+                    ],
+                }
+            ],
+        }
+    ]
+    pairing = _make_pairing(accessories)
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("get_device_info", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+    assert result["manufacturer"] == "TestCorp"
+    assert result["model"] == "LightBulb"
+    assert result["name"] == "My Light"
+    assert result["serial_number"] == "SN12345"
+    assert result["firmware_revision"] == "1.2.3"
+    assert result["hardware_revision"] == "1.0.0"
+
+
+def test_get_device_info_partial(skill, mock_controller):
+    """Test device info with some fields missing."""
+    accessories = [
+        {
+            "aid": 1,
+            "services": [
+                {
+                    "type": "3E",
+                    "characteristics": [
+                        {"type": "20", "value": "ACME"},
+                        {"type": "21", "value": "Widget"},
+                    ],
+                }
+            ],
+        }
+    ]
+    pairing = _make_pairing(accessories)
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("get_device_info", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+    assert result["manufacturer"] == "ACME"
+    assert result["model"] == "Widget"
+    assert result["serial_number"] == ""
+    assert result["firmware_revision"] == ""
+
+
+def test_get_device_info_missing_device_id(skill):
+    """Test get_device_info without device_id."""
+    with pytest.raises(ValueError, match="Missing required parameter: device_id"):
+        skill.process("get_device_info", {})
+
+
+def test_get_device_info_unknown_device(skill, mock_controller):
+    """Test get_device_info for unpaired device."""
+    mock_controller.pairings = {}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        with pytest.raises(ValueError, match="No pairing found for device"):
+            skill.process("get_device_info", {"device_id": "unknown"})
+
+
+# --- device_summary ---
+
+
+def test_device_summary_with_devices(skill, mock_controller):
+    """Test device summary with paired devices."""
+    pairing = _make_pairing([{"aid": 1, "services": [{"type": "light", "characteristics": []}]}])
+    mock_controller.aliases = {"AA:BB:CC:DD:EE:FF": MagicMock()}
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("device_summary", {})
+
+    assert result["count"] == 1
+    assert result["devices"][0]["device_id"] == "AA:BB:CC:DD:EE:FF"
+    assert result["devices"][0]["reachable"] is True
+
+
+def test_device_summary_empty(skill, mock_controller):
+    """Test device summary with no devices."""
+    mock_controller.aliases = {}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("device_summary", {})
+
+    assert result["count"] == 0
+    assert result["devices"] == []
+
+
+def test_device_summary_unreachable(skill, mock_controller):
+    """Test device summary with unreachable device."""
+    pairing = _make_pairing()
+    pairing.list_accessories_and_characteristics.side_effect = OSError("Timeout")
+    mock_controller.aliases = {"AA:BB:CC:DD:EE:FF": MagicMock()}
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("device_summary", {})
+
+    assert result["count"] == 1
+    assert result["devices"][0]["reachable"] is False
+
+
+def test_device_summary_mixed(skill, mock_controller):
+    """Test device summary with mix of reachable and unreachable."""
+    pairing_ok = _make_pairing([{"aid": 1, "services": []}])
+    pairing_bad = _make_pairing()
+    pairing_bad.list_accessories_and_characteristics.side_effect = OSError("Timeout")
+
+    mock_controller.aliases = {
+        "AA:BB:CC:DD:EE:FF": MagicMock(),
+        "11:22:33:44:55:66": MagicMock(),
+    }
+    mock_controller.pairings = {
+        "AA:BB:CC:DD:EE:FF": pairing_ok,
+        "11:22:33:44:55:66": pairing_bad,
+    }
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("device_summary", {})
+
+    assert result["count"] == 2
+    reachable = [d for d in result["devices"] if d["reachable"]]
+    unreachable = [d for d in result["devices"] if not d["reachable"]]
+    assert len(reachable) == 1
+    assert len(unreachable) == 1
+
+
+# --- health_check ---
+
+
+def test_health_check_all_reachable(skill, mock_controller):
+    """Test health check when all devices are reachable."""
+    pairing = _make_pairing([])
+    mock_controller.aliases = {"AA:BB:CC:DD:EE:FF": MagicMock()}
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("health_check", {})
+
+    assert result["total"] == 1
+    assert result["reachable"] == 1
+    assert result["unreachable"] == 0
+
+
+def test_health_check_all_unreachable(skill, mock_controller):
+    """Test health check when all devices are unreachable."""
+    pairing = _make_pairing()
+    pairing.list_accessories_and_characteristics.side_effect = OSError("Timeout")
+    mock_controller.aliases = {"AA:BB:CC:DD:EE:FF": MagicMock()}
+    mock_controller.pairings = {"AA:BB:CC:DD:EE:FF": pairing}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("health_check", {})
+
+    assert result["total"] == 1
+    assert result["reachable"] == 0
+    assert result["unreachable"] == 1
+    assert "error" in result["devices"][0]
+
+
+def test_health_check_mixed(skill, mock_controller):
+    """Test health check with mix of reachable and unreachable."""
+    pairing_ok = _make_pairing([])
+    pairing_bad = _make_pairing()
+    pairing_bad.list_accessories_and_characteristics.side_effect = OSError("Timeout")
+
+    mock_controller.aliases = {
+        "AA:BB:CC:DD:EE:FF": MagicMock(),
+        "11:22:33:44:55:66": MagicMock(),
+    }
+    mock_controller.pairings = {
+        "AA:BB:CC:DD:EE:FF": pairing_ok,
+        "11:22:33:44:55:66": pairing_bad,
+    }
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("health_check", {})
+
+    assert result["total"] == 2
+    assert result["reachable"] == 1
+    assert result["unreachable"] == 1
+
+
+def test_health_check_no_devices(skill, mock_controller):
+    """Test health check with no paired devices."""
+    mock_controller.aliases = {}
+
+    with patch.object(skill, "_get_controller", return_value=mock_controller):
+        result = skill.process("health_check", {})
+
+    assert result["total"] == 0
+    assert result["reachable"] == 0

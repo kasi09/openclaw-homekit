@@ -10,6 +10,10 @@ HomeKit Skill for [OpenClaw](https://github.com/kasi09/openclaw-python) — dire
 - **Device Discovery** — finds HomeKit devices via mDNS/Bonjour
 - **Pairing & Unpairing** — pair with devices using their setup PIN
 - **Characteristic Read/Write** — read and control any HomeKit characteristic (lights, switches, sensors, etc.)
+- **Batch Operations** — read all characteristics or set multiple values in a single call
+- **Device Identification** — trigger identify (blink/beep) on any paired device
+- **Device Info** — retrieve manufacturer, model, serial number, and firmware details
+- **Health Monitoring** — check reachability of all paired devices at once
 - **Persistent Pairings** — pairing data is saved to a JSON file for reuse across sessions
 
 ## Requirements
@@ -59,6 +63,40 @@ skill.process("set_characteristic", {"device_id": "AA:BB:CC:DD:EE:FF", "aid": 1,
 | `get_characteristic` | `device_id`, `aid`, `iid` | Read a characteristic value |
 | `set_characteristic` | `device_id`, `aid`, `iid`, `value` | Write a characteristic value |
 | `list_pairings` | — | List all stored pairings |
+| `identify` | `device_id` | Trigger device identification (blink/beep) |
+| `get_all_characteristics` | `device_id` | Read all characteristics for a device at once |
+| `set_multiple` | `device_id`, `characteristics` (list of `{aid, iid, value}`) | Set multiple characteristics in one call |
+| `get_device_info` | `device_id` | Get manufacturer, model, serial, firmware, hardware info |
+| `device_summary` | — | Human-readable summary of all paired devices and their services |
+| `health_check` | — | Check reachability of all paired devices |
+
+### Examples
+
+```python
+# Identify a device (makes it blink/beep)
+skill.process("identify", {"device_id": "AA:BB:CC:DD:EE:FF"})
+
+# Read all characteristics at once
+result = skill.process("get_all_characteristics", {"device_id": "AA:BB:CC:DD:EE:FF"})
+# {"device_id": "...", "characteristics": [{"aid": 1, "iid": 10, "value": true}, ...], "count": 5}
+
+# Set multiple characteristics in one call
+skill.process("set_multiple", {
+    "device_id": "AA:BB:CC:DD:EE:FF",
+    "characteristics": [
+        {"aid": 1, "iid": 10, "value": True},
+        {"aid": 1, "iid": 11, "value": 75},
+    ],
+})
+
+# Get device info (manufacturer, model, serial, firmware)
+result = skill.process("get_device_info", {"device_id": "AA:BB:CC:DD:EE:FF"})
+# {"manufacturer": "LIFX", "model": "A19", "firmware_revision": "3.70", ...}
+
+# Check health of all paired devices
+result = skill.process("health_check", {})
+# {"total": 3, "reachable": 2, "unreachable": 1, "devices": [...]}
+```
 
 ### Pairing PIN
 
